@@ -61,13 +61,13 @@ describe('content => ImageFilter => analyzeImage', () => {
     expect(spy).not.toHaveBeenCalled()
   })
 
-  test('skips an image with no src and leaves it untagged', () => {
+  test('reveals an image with no src without classifying it', () => {
     const spy = stubAnalyze()
     const image = makeImage(200, 200, '')
 
     new ImageFilter().analyzeImage(image)
 
-    expect(image.dataset.nsfwFilterStatus).toBeUndefined()
+    expect(image.dataset.nsfwFilterStatus).toBe('sfw')
     expect(spy).not.toHaveBeenCalled()
   })
 

@@ -38,7 +38,7 @@ const FRAME_QUALITY = 0.8
 const FRAME_PRESENTATION_TIMEOUT = 250
 // Sampling follows media time, not wall time: a paused or buffering video is not
 // showing anything new, and a 2x playback is showing it twice as fast.
-const SAMPLE_INTERVAL = 1
+const SAMPLE_INTERVAL = 10
 
 // Frames are keyed, not addressed, and the background deduplicates by key across
 // every tab. A counter alone would hand tab B the verdict for tab A's frame, so
@@ -125,6 +125,7 @@ export class VideoFilter extends Filter implements IVideoFilter {
     if (!this.active) return
 
     const state = this.stateOf(video)
+    if (state.overridden) return
     if (video.poster.length === 0) {
       // The preview is gone, and with it the reason this element is hidden. The
       // reply for it is dropped, so nothing else would settle the hide.
@@ -160,9 +161,7 @@ export class VideoFilter extends Filter implements IVideoFilter {
   }
 
   public applyEffectToBlocked (): void {
-    const blocked = mediaElements<HTMLVideoElement>(
-      'video[data-nsfw-filter-status="nsfw"],video[data-nsfw-filter-status="unavailable"]'
-    )
+    const blocked = mediaElements<HTMLVideoElement>('video[data-nsfw-filter-status="nsfw"]')
     blocked.forEach(video => this.applyEffect(video))
   }
 
@@ -253,9 +252,9 @@ export class VideoFilter extends Filter implements IVideoFilter {
       // resets it. Seeking inside the same footage would otherwise clear the
       // status and hand it back for another look that already failed once.
       if (this.isBlocked(video)) return
-      // A loop returns to footage from the same source. Cancelling every pending
-      // verdict on each lap would keep a short safe loop hidden indefinitely.
-      if (video.loop && video.currentTime === 0) {
+      // Keep an initial verdict alive across short loops, while it is still
+      // hidden. A cleared video must hide again when seeking to the beginning.
+      if (video.loop && video.currentTime === 0 && state.framePending) {
         state.lastSampleTime = Number.NEGATIVE_INFINITY
         return
       }
@@ -405,13 +404,11 @@ export class VideoFilter extends Filter implements IVideoFilter {
     state.lastSampleTime = video.currentTime
 
     try {
-      const { result, error } = await this.requestToAnalyzeImage(new PredictionRequest(frameKey(), frame))
+      const { result } = await this.requestToAnalyzeImage(new PredictionRequest(frameKey(), frame))
       if (!this.stillCurrent(state, generation)) return
       if (first) state.framePending = false
 
-      if (error !== undefined) {
-        this.markUnavailable(video)
-      } else if (result) {
+      if (result) {
         this.block(video)
       } else {
         state.approved = generation
@@ -476,41 +473,26 @@ export class VideoFilter extends Filter implements IVideoFilter {
     }
   }
 
-  // A safe poster only clears the preview, never the footage behind it: it does
-  // not count as an approved frame, and it cannot speak for a frame still being
-  // judged. A blocked poster blocks regardless, since it is what is on screen.
-  private async classifyPoster (video: HTMLVideoElement, state: VideoState): Promise<void> {
+  private classifyPoster (video: HTMLVideoElement, state: VideoState): void {
     const generation = state.generation
     const posterGeneration = state.posterGeneration
     const poster = video.poster
     const current = (): boolean =>
-      this.stillCurrent(state, generation) &&
-      state.posterGeneration === posterGeneration && video.poster === poster
+      this.stillCurrent(state, generation) && state.posterGeneration === posterGeneration && video.poster === poster
 
-    let blocked = false
-    let unavailable = false
-    try {
-      const { result, error } = await this.requestToAnalyzeImage(new PredictionRequest(poster))
-      blocked = result
-      unavailable = error !== undefined
-    } catch {
-      unavailable = true
-    }
+    this.requestToAnalyzeImage(new PredictionRequest(poster))
+      .then(({ result }) => {
+        if (!current()) return
 
-    if (!current()) return
-    if (blocked) {
-      this.block(video)
-      return
-    }
-    if (state.framePending) return
-    if (!unavailable) {
-      this.reveal(video)
-      return
-    }
-    // An unreadable poster says nothing about the footage behind it, so let a
-    // frame decide. Only media whose pixels cannot be read at all is unavailable.
-    if (state.unsampleable) this.markUnavailable(video)
-    else this.schedule(video)
+        // A safe poster only clears the preview, never the footage behind it, so
+        // it does not count as an approved frame, and it cannot reveal footage a
+        // frame is still being judged for.
+        if (result) this.block(video)
+        else if (!state.framePending) this.reveal(video)
+      })
+      .catch(() => {
+        if (current() && !state.framePending) this.reveal(video)
+      })
   }
 
   private block (video: HTMLVideoElement): void {
@@ -535,9 +517,7 @@ export class VideoFilter extends Filter implements IVideoFilter {
     if (video.dataset.nsfwFilterStatus === 'nsfw') return
 
     video.dataset.nsfwFilterStatus = 'unavailable'
-    this.applyEffect(video)
-    video.pause()
-    this.exitPictureInPicture(video)
+    this.revealElement(video)
   }
 
   private exitPictureInPicture (video: HTMLVideoElement): void {

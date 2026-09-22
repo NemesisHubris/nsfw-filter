@@ -13,10 +13,8 @@ import { injectPendingHide } from './pendingStyle'
 const STYLE_SHEET = 'link[rel~="stylesheet"], style'
 const MEDIA_SELECTOR = 'img,video,canvas,svg image'
 const BACKGROUND_EVENTS = ['pointerover', 'pointerout', 'focusin', 'focusout']
-// The root sweep visits every element and asks Chrome for a shadow root on each,
-// which on a large page costs tens of milliseconds. Most seconds have no new
-// roots to find, so it runs when the document has changed, and once every few
-// seconds regardless for a root that appeared without a mutation we saw.
+// Sweep after DOM changes, plus periodically for roots created without a
+// notification. Avoid walking the whole document on every timer tick.
 const SWEEPS_BETWEEN_FULL = 5
 
 export type IDOMWatcher = {
@@ -79,20 +77,14 @@ export class DOMWatcher implements IDOMWatcher {
     this.rootTimer = setInterval(() => this.discoverRoots(), 1000)
   }
 
-  // Live pause / allow-list: stop reacting to the page so no new image gets
-  // hidden. Revealing the already-filtered ones is ImageFilter.revealAll's job.
+  // Stop observing on pause or allow-list changes. Each filter restores its
+  // media separately through revealAll().
   public unwatch (): void {
     if (!this.watching) return
     this.watching = false
     this.observer.disconnect()
     clearInterval(this.rootTimer)
-    for (const root of this.roots) {
-      root.removeEventListener(CANVAS_DRAWN, this.onCanvasDrawn, true)
-      for (const type of BACKGROUND_EVENTS) {
-        root.removeEventListener(type, this.onBackgroundInteraction, true)
-      }
-    }
-    this.roots.clear()
+    for (const root of this.roots) this.unwatchRoot(root)
     document.removeEventListener(SHADOW_ROOT_CREATED, this.onShadowRootCreated)
     // Every stylesheet gets its own observer, so a stop that left them running
     // would keep both the callbacks and the removed <style> elements alive.
@@ -155,13 +147,12 @@ export class DOMWatcher implements IDOMWatcher {
       // only signal that those rules exist.
       sheet.addEventListener(
         'load',
-        () => this.backgroundFilter.recheckVisible(),
+        this.onStyleSheetLoad,
         { signal: this.sheetLoads.signal }
       )
       if (sheet.nodeName === 'LINK') return
 
-      // A <style> is often inserted empty and filled in afterwards, and its rules
-      // are text: nothing about that reaches the document-level observer.
+      // The main observer does not watch character-data edits inside stylesheets.
       const observer = new MutationObserver(() => this.backgroundFilter.recheckVisible())
       observer.observe(sheet, { characterData: true, childList: true, subtree: true })
       this.sheetObservers.set(sheet, observer)
@@ -170,15 +161,20 @@ export class DOMWatcher implements IDOMWatcher {
 
   // A page that mounts and unmounts styles for every render would otherwise leave
   // an observer, and the detached <style> it holds, behind on each one.
-  private dropStyleSheets (root: Element): void {
+  private dropStyleSheets (root: ParentNode): void {
     const sheets = [...root.querySelectorAll(STYLE_SHEET)]
-    if (root.matches(STYLE_SHEET)) sheets.push(root)
+    if (root instanceof Element && root.matches(STYLE_SHEET)) sheets.push(root)
 
     sheets.forEach(sheet => {
       this.sheetObservers.get(sheet)?.disconnect()
       this.sheetObservers.delete(sheet)
       this.registered.delete(sheet)
+      sheet.removeEventListener('load', this.onStyleSheetLoad)
     })
+  }
+
+  private readonly onStyleSheetLoad = (): void => {
+    if (this.watching) this.backgroundFilter.recheckVisible()
   }
 
   // A sheet is usually removed with the container it sits in, not on its own.
@@ -214,6 +210,18 @@ export class DOMWatcher implements IDOMWatcher {
     this.watchStyleSheets(root)
   }
 
+  private unwatchRoot (root: MediaRoot): void {
+    this.roots.delete(root)
+    root.removeEventListener(CANVAS_DRAWN, this.onCanvasDrawn, true)
+    for (const type of BACKGROUND_EVENTS) {
+      root.removeEventListener(type, this.onBackgroundInteraction, true)
+    }
+    this.dropStyleSheets(root)
+    if (root instanceof ShadowRoot) {
+      for (const child of root.children) this.backgroundFilter.release(child)
+    }
+  }
+
   private discoverRoots (): void {
     if (document.visibilityState !== 'visible') return
     if (!this.rootsDirty && ++this.sweeps % SWEEPS_BETWEEN_FULL !== 0) return
@@ -223,11 +231,11 @@ export class DOMWatcher implements IDOMWatcher {
     }
     const detached = [...this.roots].filter(root => root instanceof ShadowRoot && !root.host.isConnected)
     if (detached.length === 0) return
-    for (const root of detached) this.roots.delete(root)
     // disconnect() empties the record queue as well as the target list, so drain
     // it first: media in an undelivered record would otherwise never be seen,
     // and the pending rule would keep it hidden.
     this.callback(this.observer.takeRecords())
+    for (const root of detached) this.unwatchRoot(root)
     this.observer.disconnect()
     for (const root of this.roots) this.observer.observe(root, DOMWatcher.getConfig())
   }
@@ -246,7 +254,7 @@ export class DOMWatcher implements IDOMWatcher {
     if (!this.watching) return
     const canvas = event.composedPath()[0]
     if (canvas instanceof HTMLCanvasElement && event.currentTarget === canvas.getRootNode()) {
-      this.canvasFilter.observe(canvas, true)
+      this.canvasFilter.observe(canvas, { drawn: true })
     }
   }
 
@@ -283,8 +291,7 @@ export class DOMWatcher implements IDOMWatcher {
     else if (node instanceof HTMLVideoElement) this.checkVideo(node, attribute)
   }
 
-  // A style change is the page overwriting the effect we applied, not a new
-  // image to classify.
+  // Let the filter restore its effect and recheck previously small images.
   private checkImageElement (image: ImageElement, attribute: string | null): void {
     if (attribute === 'style') this.imageFilter.checkStyleMutation(image)
     else this.imageFilter.analyzeImage(image)
@@ -292,6 +299,7 @@ export class DOMWatcher implements IDOMWatcher {
 
   private checkCanvas (canvas: HTMLCanvasElement, attribute: string | null): void {
     if (attribute === 'style') this.canvasFilter.checkStyleMutation(canvas)
+    else if (attribute === 'width' || attribute === 'height') this.canvasFilter.observe(canvas, { bitmapChanged: true })
     else this.canvasFilter.observe(canvas)
   }
 

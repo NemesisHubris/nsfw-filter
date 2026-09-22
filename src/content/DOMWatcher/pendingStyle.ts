@@ -35,7 +35,6 @@ export const PENDING_HIDE_RULES = `
       [data-nsfw-filter-before-hidden]::before,
       [data-nsfw-filter-after-hidden]::after {
         background-image: none !important;
-        visibility: hidden !important;
       }
     }
   `

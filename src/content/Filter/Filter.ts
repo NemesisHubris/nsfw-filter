@@ -14,8 +14,7 @@ export type FilterSettings = {
 const BLUR = 'blur(25px)'
 const GRAYSCALE = 'grayscale(1)'
 
-// Icons, sprites and spacers: too small to be worth a round trip. Images,
-// backgrounds and canvases all draw the line in the same place.
+// Ignore small media such as icons, sprites and spacers.
 export const MIN_MEDIA_SIZE = 41
 
 // How far outside the viewport media is still worth judging, so it is ready by
@@ -35,8 +34,8 @@ type FilterRequestQueueValue = {
 
 // An image stays hidden until its prediction settles, and nothing downstream is
 // guaranteed to answer: the service worker can be torn down mid-request, and an
-// offscreen document whose TensorFlow.js backend wedged never replies. Settle
-// with an error so callers can distinguish unavailable media from safe media.
+// offscreen document whose TensorFlow.js backend wedged never replies. Reveal the
+// image rather than leave it hidden for the life of the page.
 const ANALYSIS_DEADLINE = 60000
 
 export class Filter implements IFilter {
@@ -60,12 +59,8 @@ export class Filter implements IFilter {
     this.settings = settings
   }
 
-  protected statusOf (element: FilterElement): string | undefined {
-    return element.dataset.nsfwFilterStatus
-  }
-
   public checkStyleMutation (element: FilterElement): void {
-    const status = this.statusOf(element)
+    const status = element.dataset.nsfwFilterStatus
     if (status === 'processing') {
       if (!this.isHidden(element)) this.hideElement(element)
       return
@@ -87,9 +82,8 @@ export class Filter implements IFilter {
     element.style.setProperty('visibility', 'hidden', 'important')
   }
 
-  // Remove what we wrote rather than forcing `visible`: the page may have hidden
-  // this element for its own reasons, and a filter that is off should leave no
-  // declaration of ours behind.
+  // Remove inline overrides so stylesheet rules apply again. This does not
+  // restore page-authored inline values overwritten when filtering began.
   protected revealElement (element: FilterElement): void {
     this.unsetHidden(element)
     element.style.removeProperty('filter')
@@ -104,8 +98,7 @@ export class Filter implements IFilter {
 
     const effect = this.settings.filterEffect === 'blur' ? BLUR : GRAYSCALE
     element.style.setProperty('filter', effect, 'important')
-    // Blur and grayscale show the element; lift a hide from an earlier verdict
-    // without overriding the page's own visibility.
+    // Lift the pending hide and let stylesheet visibility apply again.
     element.style.removeProperty('visibility')
     this.unsetHidden(element)
   }
@@ -126,11 +119,8 @@ export class Filter implements IFilter {
     return this.hasImportant(element, 'visibility', 'hidden')
   }
 
-  // Blocked either way: one is a verdict, the other is our answer to media we
-  // could not read. Both wear the configured effect and neither is re-judged.
   protected isBlocked (element: FilterElement): boolean {
-    const status = this.statusOf(element)
-    return status === 'nsfw' || status === 'unavailable'
+    return element.dataset.nsfwFilterStatus === 'nsfw'
   }
 
   // Zero means the element has no box yet, not that it is small: it is still a
@@ -173,18 +163,6 @@ export class Filter implements IFilter {
     })
   }
 
-  // The deadline is there to catch a pipeline that has stopped answering, not one
-  // that is merely busy. A reply is proof it is still working, so whatever is
-  // queued behind it starts its wait again: a page with more media than the model
-  // can judge inside one deadline would otherwise give up on the tail of it, and
-  // give up means blocked.
-  private _renewDeadlines (): void {
-    for (const [url, queued] of this.requestQueue) {
-      window.clearTimeout(queued.deadline)
-      queued.deadline = window.setTimeout(() => this._giveUp(url), ANALYSIS_DEADLINE)
-    }
-  }
-
   // Takes the pending entry off the queue and stops its timers. undefined means it
   // was already settled, which is how a reply that arrives too late is dropped.
   private _take (url: string): FilterRequestQueueValue | undefined {
@@ -214,7 +192,7 @@ export class Filter implements IFilter {
     const pending = this._take(url)
     if (pending === undefined) return
 
-    console.warn(`[NSFW-Filter] No verdict for ${url} after ${ANALYSIS_DEADLINE}ms, analysis unavailable`)
+    console.warn(`[NSFW-Filter] No verdict for ${url} after ${ANALYSIS_DEADLINE}ms, marked as visible`)
     for (const { resolve } of pending.waiters) {
       resolve(new PredictionResponse(false, url, 'Analysis timed out'))
     }
@@ -230,7 +208,6 @@ export class Filter implements IFilter {
       const pending = this._takeFor(request)
       if (pending === undefined) return
 
-      this._renewDeadlines()
       for (const { resolve } of pending.waiters) resolve(response)
     })
   }
@@ -247,7 +224,7 @@ export class Filter implements IFilter {
       const pending = this._takeFor(request)
       if (pending === undefined) return
 
-      console.warn(`[NSFW-Filter] Background worker is down, analysis unavailable ${request.url}`)
+      console.warn(`[NSFW-Filter] Background worker is down, marked as visible ${request.url}`)
       for (const { resolve } of pending.waiters) {
         resolve(new PredictionResponse(false, request.url, 'Background worker doesn\'t working'))
       }

@@ -185,7 +185,7 @@ describe('content => VideoFilter', () => {
   })
 
   // Cross-origin footage can play even when its pixels cannot be inspected.
-  test('keeps unreadable video hidden', async () => {
+  test('leaves unreadable video visible', async () => {
     stubCanvas('taint')
     const { sent } = stubRuntime()
     const video = makeVideo()
@@ -195,8 +195,8 @@ describe('content => VideoFilter', () => {
 
     expect(sent).toHaveLength(0)
     expect(video.dataset.nsfwFilterStatus).toBe('unavailable')
-    expect(video.style.visibility).toBe('hidden')
-    expect(video.paused).toBe(true)
+    expect(video.style.visibility).toBe('')
+    expect(video.paused).toBe(false)
   })
 
   test('stops sampling a video it cannot read', async () => {

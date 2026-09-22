@@ -115,14 +115,13 @@ describe('Videos on the page', () => {
     expect(await statuses(page, 'tiny')).not.toContain('tiny:processing')
   })
 
-  // A failed pixel read cannot establish that the footage is safe.
-  test('blurs and pauses a video whose frames cannot be read', async () => {
+  // Cross-origin footage can play even when its pixels cannot be inspected.
+  test('leaves a video whose frames cannot be read visible', async () => {
     await waitForStatus(page, 'foreign', 'unavailable')
     const foreign = await read(page, 'foreign')
     expect(foreign.status).toBe('unavailable')
     expect(foreign.visibility).toBe('visible')
-    expect(foreign.filter).toBe('blur(25px)')
-    expect(foreign.paused).toBe(true)
+    expect(foreign.filter).toBe('none')
   })
 
   test('picks up and classifies a video added after load', async () => {

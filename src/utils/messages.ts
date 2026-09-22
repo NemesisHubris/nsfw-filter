@@ -71,7 +71,6 @@ export class PredictionResponse {
   public readonly result: boolean
   public readonly message: string
   public readonly url: string
-  public readonly error?: string
 
   constructor (result: boolean, url: string, error?: string) {
     const message = typeof error === 'string' && error.length > 0
@@ -81,6 +80,10 @@ export class PredictionResponse {
     this.url = url
     this.result = result
     this.message = message
-    this.error = error
   }
 }
+
+// A classification lost to the offscreen document reloading itself onto WASM,
+// rather than one the model answered. The service worker matches on it to decide
+// whether sending the image again is worth anything.
+export const RESTARTING_MESSAGE = 'Restarting the offscreen document on WASM'

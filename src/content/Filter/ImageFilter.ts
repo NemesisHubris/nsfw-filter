@@ -31,9 +31,8 @@ export class ImageFilter extends Filter implements IImageFilter {
   constructor () {
     super()
     // Every filter shares one prediction chain, so asking about a whole page of
-    // images at once pushes the last of them past their deadline, where they
-    // settle as unavailable and are blocked. An image keeps its processing tag
-    // and stays hidden until it comes within range of the viewport.
+    // images at once delays the media the user is actually looking at. Pending
+    // images stay hidden until they come within range of the viewport.
     this.viewport = new IntersectionObserver(entries => {
       for (const entry of entries) {
         const image = entry.target as ImageElement
@@ -57,9 +56,11 @@ export class ImageFilter extends Filter implements IImageFilter {
     if (!this.active) return
     if (!this.wired.has(image)) {
       this.wired.add(image)
-      // Responsive selection can change without a src mutation (picture, sizes,
-      // viewport or pixel density). load tells us which resource Chrome chose.
-      image.addEventListener('load', () => this.analyzeImage(image))
+      // Resource selection can finish after the src mutation, including a
+      // failed load. Recheck the source once Chrome has settled that selection.
+      const recheck = (): void => this.analyzeImage(image)
+      image.addEventListener('load', recheck)
+      image.addEventListener('error', recheck)
     }
 
     const source = this.sourceOf(image)
@@ -72,7 +73,9 @@ export class ImageFilter extends Filter implements IImageFilter {
     // Nothing to judge. An element whose source is cleared mid-flight has to be
     // released, or it keeps a `processing` tag no reply will ever settle.
     if (source === '') {
-      if (status === 'processing') this.showImage(image)
+      this.viewport.unobserve(image)
+      this.awaiting.delete(image)
+      this.showImage(image)
       return
     }
 
@@ -80,6 +83,8 @@ export class ImageFilter extends Filter implements IImageFilter {
       ? image
       : image.getBoundingClientRect()
     if (this.belowMinSize(width, height)) {
+      this.viewport.unobserve(image)
+      this.awaiting.delete(image)
       this.smallImages.add(image)
       // Small images are re-measured on every call, so only write when the tag
       // is not already the one this would set.
@@ -90,15 +95,11 @@ export class ImageFilter extends Filter implements IImageFilter {
     this.smallImages.delete(image)
     this.awaiting.add(image)
 
-    // A verdict already on the element is on screen, and whatever changed here
-    // makes it stale: take it down and ask again now. Waiting to be told the
-    // element is in view would leave the old verdict showing, which is what a
-    // seek preview swapping its source through one <img> does.
+    // Hide and recheck changed sources immediately, including seek previews
+    // that reuse an already-visible image.
     if (status !== undefined) this.classify(image)
-    // A first look waits instead, since observing reports what is in view. Until
-    // then it stays untagged, where the pending rule hides it without collapsing
-    // the box the observer needs: tagging hides it inline, and `hidden` on a BODY
-    // child removes that box.
+    // Keep new images under the pending CSS rule until they approach the viewport.
+    // Inline hiding can collapse BODY children and prevent an intersection.
     else this.viewport.observe(image)
   }
 
@@ -163,11 +164,9 @@ export class ImageFilter extends Filter implements IImageFilter {
       this.epoch === epoch && this.sourceOf(image) === source && !this.unhidden.has(image)
 
     try {
-      const { result, error } = await this.requestToAnalyzeImage(new PredictionRequest(source))
+      const { result } = await this.requestToAnalyzeImage(new PredictionRequest(source))
       if (!current()) return
-      if (error !== undefined) {
-        this.markUnavailable(image)
-      } else if (result) {
+      if (result) {
         this.blockedItems++
         image.dataset.nsfwFilterStatus = 'nsfw'
         this.applyEffect(image)
@@ -175,13 +174,8 @@ export class ImageFilter extends Filter implements IImageFilter {
         this.showImage(image)
       }
     } catch {
-      if (current()) this.markUnavailable(image)
+      if (current()) this.showImage(image)
     }
-  }
-
-  private markUnavailable (image: ImageElement): void {
-    image.dataset.nsfwFilterStatus = 'unavailable'
-    this.applyEffect(image)
   }
 
   private showImage (image: ImageElement): void {

@@ -3,8 +3,13 @@ import { mediaElements } from '../mediaRoots'
 
 import { Filter } from './Filter'
 
+type CanvasChange = {
+  drawn?: boolean
+  bitmapChanged?: boolean
+}
+
 export type ICanvasFilter = {
-  observe: (canvas: HTMLCanvasElement, drawn?: boolean) => void
+  observe: (canvas: HTMLCanvasElement, change?: CanvasChange) => void
   revealCanvas: (canvas: HTMLCanvasElement) => void
   checkStyleMutation: (canvas: HTMLCanvasElement) => void
   applyEffectToBlocked: () => void
@@ -35,6 +40,8 @@ const snapshotKey = (): string => `nsfw-filter-canvas:${REALM}-${++snapshots}`
 export class CanvasFilter extends Filter implements ICanvasFilter {
   private readonly states = new WeakMap<HTMLCanvasElement, CanvasState>()
   private readonly visible = new Set<HTMLCanvasElement>()
+  private readonly due = new Set<HTMLCanvasElement>()
+  private sampling = false
   private readonly viewport: IntersectionObserver
   private timer: ReturnType<typeof setInterval> | undefined
   private active = true
@@ -46,21 +53,28 @@ export class CanvasFilter extends Filter implements ICanvasFilter {
       for (const entry of entries) {
         const canvas = entry.target as HTMLCanvasElement
         if (entry.isIntersecting) this.visible.add(canvas)
-        else this.visible.delete(canvas)
+        else {
+          this.visible.delete(canvas)
+          if (!canvas.isConnected) {
+            this.viewport.unobserve(canvas)
+            this.due.delete(canvas)
+            this.states.delete(canvas)
+          }
+        }
       }
       this.sampleVisible()
     })
   }
 
-  public observe (canvas: HTMLCanvasElement, drawn = false): void {
+  public observe (canvas: HTMLCanvasElement, { drawn = false, bitmapChanged = false }: CanvasChange = {}): void {
     if (!this.active) return
-    if (this.states.get(canvas)?.epoch !== this.epoch) {
+    if (bitmapChanged || this.states.get(canvas)?.epoch !== this.epoch) {
       this.states.set(canvas, { epoch: this.epoch, pixels: '', pending: false, overridden: false })
       canvas.dataset.nsfwFilterStatus = 'processing'
       this.hideElement(canvas)
     }
     this.viewport.observe(canvas)
-    if (drawn) this.sampleCanvas(canvas)
+    if (drawn) this.checkDrawing(canvas)
     if (this.timer === undefined) {
       this.timer = setInterval(() => this.sampleVisible(), SAMPLE_INTERVAL)
     }
@@ -90,6 +104,7 @@ export class CanvasFilter extends Filter implements ICanvasFilter {
     this.timer = undefined
     this.viewport.disconnect()
     this.visible.clear()
+    this.due.clear()
   }
 
   public revealAll (): void {
@@ -100,12 +115,24 @@ export class CanvasFilter extends Filter implements ICanvasFilter {
     }
   }
 
+  private checkDrawing (canvas: HTMLCanvasElement): void {
+    const state = this.states.get(canvas)
+    if (!state?.overridden && !this.isBlocked(canvas) && canvas.dataset.nsfwFilterStatus !== 'unavailable') {
+      // Drawing can arrive before an intersection or while another canvas is
+      // being judged. Hide now; capture only when this canvas gets its turn.
+      canvas.dataset.nsfwFilterStatus = 'processing'
+      this.hideElement(canvas)
+    }
+    this.sampleCanvas(canvas)
+  }
+
   private sampleVisible (): void {
     if (!this.active || document.visibilityState !== 'visible') return
     for (const canvas of this.visible) {
       if (!canvas.isConnected) {
         this.visible.delete(canvas)
         this.viewport.unobserve(canvas)
+        this.due.delete(canvas)
         this.states.delete(canvas)
         continue
       }
@@ -114,10 +141,34 @@ export class CanvasFilter extends Filter implements ICanvasFilter {
   }
 
   private sampleCanvas (canvas: HTMLCanvasElement): void {
+    if (!this.eligible(canvas)) return
+    this.due.add(canvas)
+    void this.drain()
+  }
+
+  private eligible (canvas: HTMLCanvasElement): boolean {
     const state = this.states.get(canvas)
-    if (state === undefined || state.pending || state.overridden) return
-    if (this.isBlocked(canvas)) return
-    void this.sample(canvas, state)
+    return this.active && canvas.isConnected && this.visible.has(canvas) &&
+      document.visibilityState === 'visible' && state !== undefined &&
+      !state.pending && !state.overridden && !this.isBlocked(canvas) &&
+      canvas.dataset.nsfwFilterStatus !== 'unavailable'
+  }
+
+  // Like video capture, keep one snapshot in flight per document. Draw events
+  // coalesce in the set, and pixels are captured only when their turn comes.
+  private async drain (): Promise<void> {
+    if (this.sampling) return
+    this.sampling = true
+    try {
+      for (const canvas of this.due) {
+        this.due.delete(canvas)
+        const state = this.states.get(canvas)
+        if (state === undefined || !this.eligible(canvas)) continue
+        await this.sample(canvas, state)
+      }
+    } finally {
+      this.sampling = false
+    }
   }
 
   private async sample (canvas: HTMLCanvasElement, state: CanvasState): Promise<void> {
@@ -139,7 +190,11 @@ export class CanvasFilter extends Filter implements ICanvasFilter {
         return copy.toDataURL('image/png')
       }
       const pixels = readPixels()
-      if (pixels === state.pixels) return
+      if (pixels === state.pixels) {
+        canvas.dataset.nsfwFilterStatus = 'sfw'
+        this.revealElement(canvas)
+        return
+      }
       state.pixels = pixels
       canvas.dataset.nsfwFilterStatus = 'processing'
       this.hideElement(canvas)
@@ -151,9 +206,8 @@ export class CanvasFilter extends Filter implements ICanvasFilter {
         this.revealElement(canvas)
         return
       }
-      const { result, error } = await this.requestToAnalyzeImage(new PredictionRequest(snapshotKey(), pixels))
-      if (epoch !== this.epoch || state.overridden) return
-      if (error !== undefined) throw new Error(error)
+      const { result } = await this.requestToAnalyzeImage(new PredictionRequest(snapshotKey(), pixels))
+      if (epoch !== this.epoch || this.states.get(canvas) !== state || state.overridden) return
       // Drawing can continue while the model works. A safe verdict must not
       // reveal different pixels; the next sample will inspect those instead.
       if (!result && readPixels() !== pixels) {
@@ -168,9 +222,9 @@ export class CanvasFilter extends Filter implements ICanvasFilter {
         this.revealElement(canvas)
       }
     } catch {
-      if (epoch !== this.epoch || state.overridden) return
+      if (epoch !== this.epoch || this.states.get(canvas) !== state || state.overridden) return
       canvas.dataset.nsfwFilterStatus = 'unavailable'
-      this.applyEffect(canvas)
+      this.revealElement(canvas)
     } finally {
       state.pending = false
     }

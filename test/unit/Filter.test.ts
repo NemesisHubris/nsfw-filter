@@ -91,7 +91,7 @@ afterEach(() => {
 })
 
 describe('content => Filter => analysis deadline', () => {
-  test('keeps an image hidden when the background never answers', async () => {
+  test('reveals an image the background never answers for', async () => {
     stubRuntime()
     const image = makeImage()
 
@@ -101,8 +101,8 @@ describe('content => Filter => analysis deadline', () => {
 
     await jest.advanceTimersByTimeAsync(ANALYSIS_DEADLINE)
 
-    expect(image.dataset.nsfwFilterStatus).toBe('unavailable')
-    expect(image.style.visibility).toBe('hidden')
+    expect(image.dataset.nsfwFilterStatus).toBe('sfw')
+    expect(image.style.visibility).toBe('')
   })
 
   test('keeps the image hidden until the deadline is actually reached', async () => {
@@ -138,13 +138,13 @@ describe('content => Filter => analysis deadline', () => {
     reply({ result: true, url: image.src })
     await jest.advanceTimersByTimeAsync(0)
 
-    expect(image.dataset.nsfwFilterStatus).toBe('unavailable')
-    expect(image.style.visibility).toBe('hidden')
+    expect(image.dataset.nsfwFilterStatus).toBe('sfw')
+    expect(image.style.visibility).toBe('')
   })
 
   // Two <img> elements sharing a src are deduplicated onto one request, so the
   // deadline has to settle every waiter, not just the first.
-  test('keeps every image hidden when a shared request times out', async () => {
+  test('reveals every image waiting on the same url', async () => {
     stubRuntime()
     const first = makeImage()
     const second = makeImage()
@@ -154,12 +154,12 @@ describe('content => Filter => analysis deadline', () => {
     filter.analyzeImage(second)
     await jest.advanceTimersByTimeAsync(ANALYSIS_DEADLINE)
 
-    expect(first.style.visibility).toBe('hidden')
-    expect(second.style.visibility).toBe('hidden')
+    expect(first.style.visibility).toBe('')
+    expect(second.style.visibility).toBe('')
   })
 
   // Giving up on an unreachable worker settles every waiter and stops retrying.
-  test('keeps every image hidden when the background worker never comes back', async () => {
+  test('reveals every image when the background worker never comes back', async () => {
     const { sent } = stubUnreachableRuntime()
     const first = makeImage()
     const second = makeImage()
@@ -169,8 +169,8 @@ describe('content => Filter => analysis deadline', () => {
     filter.analyzeImage(second)
     await jest.advanceTimersByTimeAsync(ANALYSIS_DEADLINE)
 
-    expect(first.style.visibility).toBe('hidden')
-    expect(second.style.visibility).toBe('hidden')
+    expect(first.style.visibility).toBe('')
+    expect(second.style.visibility).toBe('')
     expect(sent()).toBe(6)
   })
 
@@ -186,7 +186,7 @@ describe('content => Filter => analysis deadline', () => {
     await jest.advanceTimersByTimeAsync(5000)
 
     expect(runtime.sent()).toBe(1)
-    expect(image.style.visibility).toBe('hidden')
+    expect(image.style.visibility).toBe('')
   })
 
   // The runtime error for an abandoned request arrives while the same url is queued

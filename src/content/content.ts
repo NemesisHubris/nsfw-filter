@@ -46,7 +46,7 @@ const wireContextMenuUnhide = (
     )
     const target = (found ?? null) as ImageElement | HTMLVideoElement | HTMLCanvasElement | null
     const status = target?.dataset.nsfwFilterStatus
-    const filtered = status === 'nsfw' || status === 'unavailable'
+    const filtered = status === 'nsfw'
     lastTarget = filtered ? target : null
     chrome.runtime.sendMessage({ type: CONTEXT_TARGET, filtered }).catch(() => undefined)
   }, true)
