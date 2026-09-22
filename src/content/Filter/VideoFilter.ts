@@ -125,7 +125,7 @@ export class VideoFilter extends Filter implements IVideoFilter {
     if (!this.active) return
 
     const state = this.stateOf(video)
-    if (state.overridden) return
+    if (state.overridden || state.unsampleable) return
     if (video.poster.length === 0) {
       // The preview is gone, and with it the reason this element is hidden. The
       // reply for it is dropped, so nothing else would settle the hide.
@@ -467,8 +467,6 @@ export class VideoFilter extends Filter implements IVideoFilter {
     } catch {
       // SecurityError: cross-origin media without CORS, or DRM. The page can play
       // it, we cannot read it, and retrying cannot change that.
-      state.unsampleable = true
-
       return null
     }
   }
@@ -507,7 +505,7 @@ export class VideoFilter extends Filter implements IVideoFilter {
   // A frame and a poster can be in flight together, and either can come back
   // first. Whichever loses the race must not put an unsafe video back on screen.
   private reveal (video: HTMLVideoElement): void {
-    if (this.isBlocked(video)) return
+    if (this.isBlocked(video) || this.stateOf(video).unsampleable) return
 
     video.dataset.nsfwFilterStatus = 'sfw'
     this.revealElement(video)
@@ -516,6 +514,9 @@ export class VideoFilter extends Filter implements IVideoFilter {
   private markUnavailable (video: HTMLVideoElement): void {
     if (video.dataset.nsfwFilterStatus === 'nsfw') return
 
+    const state = this.stateOf(video)
+    state.unsampleable = true
+    this.due.delete(video)
     video.dataset.nsfwFilterStatus = 'unavailable'
     this.revealElement(video)
   }

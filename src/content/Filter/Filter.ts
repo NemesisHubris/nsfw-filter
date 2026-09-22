@@ -11,6 +11,9 @@ export type FilterSettings = {
   filterEffect: FilterEffect
 }
 
+type StyleProperty = 'visibility' | 'filter'
+type SavedStyle = { value: string, priority: string, override: string }
+
 const BLUR = 'blur(25px)'
 const GRAYSCALE = 'grayscale(1)'
 
@@ -42,6 +45,7 @@ export class Filter implements IFilter {
   protected blockedItems: number
   protected settings: FilterSettings
   private readonly requestQueue: Map<string, FilterRequestQueueValue>
+  private readonly savedStyles = new WeakMap<FilterElement, Partial<Record<StyleProperty, SavedStyle>>>()
   private readonly hiddenByUs: WeakSet<FilterElement>
 
   constructor () {
@@ -79,15 +83,13 @@ export class Filter implements IFilter {
       element.hidden = true
       this.hiddenByUs.add(element)
     }
-    element.style.setProperty('visibility', 'hidden', 'important')
+    this.overrideStyle(element, 'visibility', 'hidden')
   }
 
-  // Remove inline overrides so stylesheet rules apply again. This does not
-  // restore page-authored inline values overwritten when filtering began.
   protected revealElement (element: FilterElement): void {
     this.unsetHidden(element)
-    element.style.removeProperty('filter')
-    element.style.removeProperty('visibility')
+    this.restoreStyle(element, 'filter')
+    this.restoreStyle(element, 'visibility')
   }
 
   protected applyEffect (element: FilterElement): void {
@@ -97,10 +99,42 @@ export class Filter implements IFilter {
     }
 
     const effect = this.settings.filterEffect === 'blur' ? BLUR : GRAYSCALE
-    element.style.setProperty('filter', effect, 'important')
-    // Lift the pending hide and let stylesheet visibility apply again.
-    element.style.removeProperty('visibility')
+    this.overrideStyle(element, 'filter', effect)
+    // Lift our pending hide without changing the page’s visibility.
+    this.restoreStyle(element, 'visibility')
     this.unsetHidden(element)
+  }
+
+  private overrideStyle (element: FilterElement, property: StyleProperty, value: string): void {
+    const saved = this.savedStyles.get(element) ?? {}
+    const previous = saved[property]
+    // A page write since our last override becomes the value to restore.
+    if (previous === undefined || !this.hasImportant(element, property, previous.override)) {
+      saved[property] = {
+        value: element.style.getPropertyValue(property),
+        priority: element.style.getPropertyPriority(property),
+        override: value
+      }
+    } else {
+      previous.override = value
+    }
+    this.savedStyles.set(element, saved)
+    element.style.setProperty(property, value, 'important')
+  }
+
+  private restoreStyle (element: FilterElement, property: StyleProperty): void {
+    const saved = this.savedStyles.get(element)
+    if (saved === undefined) return
+    const previous = saved[property]
+    if (previous === undefined) return
+
+    // Leave newer page-authored styles alone.
+    if (this.hasImportant(element, property, previous.override)) {
+      if (previous.value === '') element.style.removeProperty(property)
+      else element.style.setProperty(property, previous.value, previous.priority)
+    }
+    delete saved[property]
+    if (saved.visibility === undefined && saved.filter === undefined) this.savedStyles.delete(element)
   }
 
   private unsetHidden (element: FilterElement): void {

@@ -235,11 +235,12 @@ describe('content => ImageFilter => revealAll', () => {
   test('reveals every blocked image and clears its status', () => {
     const image = makeImage(200, 200)
     image.dataset.nsfwFilterStatus = 'nsfw'
-    image.style.filter = 'blur(25px)'
-    image.style.visibility = 'hidden'
     document.body.appendChild(image)
+    const filter = new ImageFilter()
+    filter.setSettings({ filterEffect: 'blur' })
+    filter.applyEffectToBlocked()
 
-    new ImageFilter().revealAll()
+    filter.revealAll()
 
     expect(image.style.filter).toBe('')
     expect(image.style.visibility).toBe('')
@@ -281,10 +282,13 @@ describe('content => ImageFilter => revealImage', () => {
   test('clears a blurred image and retags it sfw', () => {
     const image = makeImage(200, 200)
     image.dataset.nsfwFilterStatus = 'nsfw'
-    image.style.filter = 'blur(25px)'
-    image.style.visibility = 'hidden'
+    document.body.appendChild(image)
+    const filter = new ImageFilter()
+    filter.setSettings({ filterEffect: 'blur' })
+    filter.applyEffectToBlocked()
 
-    new ImageFilter().revealImage(image)
+    filter.revealImage(image)
+    image.remove()
 
     expect(image.style.filter).toBe('')
     expect(image.style.visibility).toBe('')

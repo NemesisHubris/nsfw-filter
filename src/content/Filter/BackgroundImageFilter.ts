@@ -272,7 +272,8 @@ export class BackgroundImageFilter extends Filter implements IBackgroundImageFil
       const { width, height } = element.getBoundingClientRect()
       const canvas = element === document.body || element === document.documentElement
       if (!canvas && (width <= MIN_MEDIA_SIZE || height <= MIN_MEDIA_SIZE)) {
-        if (width > 0 && height > 0 && element.dataset[layer.statusKey] === undefined) {
+        if (width > 0 && height > 0) {
+          this.clear(element, layer)
           element.dataset[layer.statusKey] = 'sfw'
         }
         return
